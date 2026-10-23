@@ -1,10 +1,21 @@
-import { createServerClient, type CookieOptions } from '@supabase/ssr'
-import { NextResponse, type NextRequest } from 'next/server'
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { NextResponse, type NextRequest } from "next/server";
 
-type CookieToSet = { name: string; value: string; options: CookieOptions }
+const PUBLIC_ROUTES = [
+  "/login",
+  "/signup",
+  "/forgot-password",
+  "/reset-password",
+  "/auth/confirm",
+];
 
+/**
+ * Refresca la sesion de Supabase en cada request y protege rutas privadas.
+ * Llamado desde src/proxy.ts (Next.js 16 renombro middleware.ts -> proxy.ts,
+ * corriendo en runtime Node.js en vez de Edge).
+ */
 export async function updateSession(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request })
+  let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,23 +23,45 @@ export async function updateSession(request: NextRequest) {
     {
       cookies: {
         getAll() {
-          return request.cookies.getAll()
+          return request.cookies.getAll();
         },
-        setAll(cookiesToSet: CookieToSet[]) {
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value)
-          )
-          supabaseResponse = NextResponse.next({ request })
+          );
+          response = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
+            response.cookies.set(name, value, options)
+          );
         },
       },
     }
-  )
+  );
 
-  // No poner código entre createServerClient y getUser.
-  const { data: { user } } = await supabase.auth.getUser()
+  // IMPORTANTE: no quitar esta linea. getUser() revalida el token contra
+  // Supabase (a diferencia de getSession(), que solo lee la cookie) y es
+  // lo que realmente refresca la sesion cuando esta por expirar.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  return { supabaseResponse, user }
+  const path = request.nextUrl.pathname;
+  const isPublicRoute = PUBLIC_ROUTES.some((route) => path.startsWith(route));
+  const isAuthPage = ["/login", "/signup"].includes(path);
+
+  if (!user && !isPublicRoute && path !== "/") {
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.searchParams.set("redirectedFrom", path);
+    return NextResponse.redirect(url);
+  }
+
+  if (user && isAuthPage) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/dashboard";
+    url.searchParams.delete("redirectedFrom");
+    return NextResponse.redirect(url);
+  }
+
+  return response;
 }
